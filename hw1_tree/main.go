@@ -1,10 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"sort"
-	"fmt"
 )
 
 func main() {
