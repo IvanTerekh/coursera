@@ -45,27 +45,31 @@ func ExecutePipeline(jobs ...job) {
 //( конкатенация двух строк через ~), где data - то что пришло
 // на вход (по сути - числа из первой функции).
 func SingleHash(in, out chan interface{}) {
-	wgSingleHash := &sync.WaitGroup{}
+	wg := &sync.WaitGroup{}
 	for data := range in {
 		data := data
-		wgSingleHash.Add(1)
+		wg.Add(1)
 		go func() {
-			dataInt, ok := data.(int)
-			if !ok {
-				panic(fmt.Errorf("could not convert to int: %#v", data))
-			}
-			dataStr := strconv.Itoa(dataInt)
-			wg := &sync.WaitGroup{}
-			wg.Add(2)
-			hash1 := asyncCrc32(dataStr, wg)
-			hash2 := asyncCrc32(syncMd5.sign(dataStr), wg)
-			wg.Wait()
-			hash := *hash1 + "~" + *hash2
-			out <- hash
-			wgSingleHash.Done()
+			asyncSingleHash(data, out)
+			wg.Done()
 		}()
 	}
-	wgSingleHash.Wait()
+	wg.Wait()
+}
+
+func asyncSingleHash(data interface{}, out chan<- interface{}) {
+	dataInt, ok := data.(int)
+	if !ok {
+		panic(fmt.Errorf("could not convert to int: %#v", data))
+	}
+	dataStr := strconv.Itoa(dataInt)
+	wg := &sync.WaitGroup{}
+	wg.Add(2)
+	hash1 := asyncCrc32(dataStr, wg)
+	hash2 := asyncCrc32(syncMd5.sign(dataStr), wg)
+	wg.Wait()
+	hash := *hash1 + "~" + *hash2
+	out <- hash
 }
 
 func asyncCrc32(data string, wg *sync.WaitGroup) *string {
@@ -83,33 +87,37 @@ func asyncCrc32(data string, wg *sync.WaitGroup) *string {
 // в порядке расчета (0..5), где data - то что пришло на вход
 // (и ушло на выход из SingleHash)
 func MultiHash(in, out chan interface{}) {
-	n := 6
 	wgMultiHash := &sync.WaitGroup{}
 	for data := range in {
 		data := data
 		wgMultiHash.Add(1)
 		go func() {
-			dataStr, ok := data.(string)
-			if !ok {
-				panic(fmt.Errorf("could not convert to string: %#v", data))
-			}
-			hashes := make([]*string, n)
-			wg := &sync.WaitGroup{}
-			wg.Add(n)
-			for i := range hashes {
-				iStr := strconv.Itoa(i)
-				hashes[i] = asyncCrc32(iStr + dataStr, wg)
-			}
-			res := strings.Builder{}
-			wg.Wait()
-			for _, hash := range hashes {
-				res.WriteString(*hash)
-			}
-			out <- res.String()
+			asyncMultiHash(data, out)
 			wgMultiHash.Done()
 		}()
 	}
 	wgMultiHash.Wait()
+}
+
+func asyncMultiHash(data interface{}, out chan<- interface{}) {
+	n := 6
+	dataStr, ok := data.(string)
+	if !ok {
+		panic(fmt.Errorf("could not convert to string: %#v", data))
+	}
+	hashes := make([]*string, n)
+	wg := &sync.WaitGroup{}
+	wg.Add(n)
+	for i := range hashes {
+		iStr := strconv.Itoa(i)
+		hashes[i] = asyncCrc32(iStr+dataStr, wg)
+	}
+	res := strings.Builder{}
+	wg.Wait()
+	for _, hash := range hashes {
+		res.WriteString(*hash)
+	}
+	out <- res.String()
 }
 
 // CombineResults получает все результаты, сортирует
