@@ -18,25 +18,21 @@ func (mx *syncMd5Signer) sign(data string) string {
 
 var syncMd5 = syncMd5Signer{}
 
-func (j *job) do(in, out chan interface{}, wg *sync.WaitGroup) {
-	(func(in, out chan interface{}))(*j)(in, out)
-	close(out)
-	wg.Done()
-}
-
 func ExecutePipeline(jobs ...job) {
-	var in, out chan interface{} = nil, make(chan interface{})
+	var in, out chan interface{}
 	wg := &sync.WaitGroup{}
 
-	n := len(jobs)
-	wg.Add(n)
-
-	go jobs[0].do(in, out, wg)
-
-	for i := 1; i < n; i++ {
+	for _, job := range jobs {
 		in = out
 		out = make(chan interface{})
-		go jobs[i].do(in, out, wg)
+
+		job := job
+		wg.Add(1)
+		go func(in, out chan interface{}) {
+			job(in, out)
+			close(out)
+			wg.Done()
+		}(in, out)
 	}
 	wg.Wait()
 }
