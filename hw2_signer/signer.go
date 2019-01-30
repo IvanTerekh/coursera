@@ -1,11 +1,11 @@
 package main
 
 import (
-	"sync"
+	"fmt"
+	"sort"
 	"strconv"
 	"strings"
-	"sort"
-	"fmt"
+	"sync"
 )
 
 type syncMd5Signer sync.Mutex
