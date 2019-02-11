@@ -2,12 +2,12 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"log"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"text/template"
@@ -58,12 +58,10 @@ func authMiddleware(next http.Handler) http.Handler {
 }
 `))
 
-	ServeHTTPTmpl = template.Must(template.New(`serveHTTP`).Parse(
-		`
+	ServeHTTPTmpl = template.Must(template.New(`serveHTTP`).Parse(`
 func (srv *{{.ApiName}}) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
-	switch path {
-{{range .Methods}}
+	switch path { {{range .Methods}}
 	case "{{.Url}}":
 		handler := http.Handler(http.HandlerFunc(srv.Handler{{.Name}}))
 {{if .Auth}}		handler = authMiddleware(handler){{end}}
@@ -75,8 +73,7 @@ func (srv *{{.ApiName}}) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 `))
 
-	Handler = template.Must(template.New(`Handler`).Parse(
-		`
+	Handler = template.Must(template.New(`Handler`).Parse(`
 func (srv *{{.Api}}) Handler{{.Name}}(w http.ResponseWriter, r *http.Request) {
 	params, err := parse{{.ParamsName}}(r)
 	if err != nil {
@@ -110,8 +107,7 @@ func (srv *{{.Api}}) Handler{{.Name}}(w http.ResponseWriter, r *http.Request) {
 }
 `))
 
-	ParseParams = template.Must(template.New(`ParseParams`).Parse(
-	`
+	ParseParams = template.Must(template.New(`ParseParams`).Parse(`
 func parse{{.ParamsName}}(r *http.Request) (*{{.ParamsName}}, error) {
 	err := r.ParseForm()
 	if err != nil {
@@ -130,10 +126,16 @@ func parse{{.ParamsName}}(r *http.Request) (*{{.ParamsName}}, error) {
 	params.{{.Name}} = {{.Name}}
 {{end}}{{end}}
 {{range .Params}}
-{{if ne .DefaultVal ""}}
+{{if .DefaultVal}}
+	{{if eq .TypeName "int"}}
+	if params.{{.Name}} == 0 {
+		params.{{.Name}} = {{.DefaultVal}}
+	}
+	{{else}}
 	if params.{{.Name}} == "" {
 		params.{{.Name}} = "{{.DefaultVal}}"
 	}
+	{{end}}
 {{end}}
 {{if .Required}}
 	if params.{{.Name}} == "" {
@@ -164,7 +166,8 @@ func parse{{.ParamsName}}(r *http.Request) (*{{.ParamsName}}, error) {
 {{end}}
 {{end}}
 	return params, nil
-}`))
+}
+`))
 )
 
 type apiMethod struct {
@@ -220,8 +223,6 @@ func main() {
 
 	apis := extractApis(node)
 	for apiName, methods := range apis {
-		fmt.Println(apiName)
-		fmt.Printf("%#v\n", methods)
 		err = ServeHTTPTmpl.Execute(out, struct {
 			ApiName string
 			Methods []apiMethod
@@ -244,6 +245,15 @@ func main() {
 				log.Println(err)
 			}
 		}
+	}
+
+	err = out.Close()
+	if err != nil {
+		log.Println(err)
+	}
+	err = exec.Command("go", "fmt", os.Args[2]).Run()
+	if err != nil {
+		log.Println(err)
 	}
 
 }
@@ -357,6 +367,15 @@ func extractParams(fields *ast.FieldList) []param {
 				param.Enum = strings.Split(val, "|")
 			case "default":
 				param.DefaultVal = val
+				//switch param.TypeName {
+				//case "string":
+				//case "int":
+				//	intVal, err := strconv.Atoi(val)
+				//	if err != nil {
+				//		log.Println(err)
+				//	}
+				//	param.DefaultVal = intVal
+				//}
 			case "min":
 				param.Min = true
 				min, err := strconv.Atoi(val)
