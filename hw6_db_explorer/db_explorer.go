@@ -158,18 +158,18 @@ func (e *DbExplorer) response(w http.ResponseWriter, data interface{}) {
 	response := struct {
 		Response interface{} `json:"response"`
 	}{Response: data}
-	responseJson, err := json.Marshal(response)
+	responseJSON, err := json.Marshal(response)
 	if err != nil {
 		e.error(w, err, http.StatusInternalServerError)
 	}
-	w.Write(responseJson)
+	w.Write(responseJSON)
 }
 
 func (e *DbExplorer) error(w http.ResponseWriter, err error, code int) {
-	message, errJson := json.Marshal(struct {
+	message, errJSON := json.Marshal(struct {
 		Err string `json:"error"`
 	}{Err: err.Error()})
-	if errJson != nil {
+	if errJSON != nil {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 	}
 	http.Error(w, string(message), code)
@@ -180,9 +180,9 @@ func (e *DbExplorer) tableHandler(t table) http.HandlerFunc {
 		path := strings.Split(r.URL.Path, "/")
 		var id *int
 		if len(path) > 2 {
-			parsedId, err := strconv.Atoi(path[2])
+			parsedID, err := strconv.Atoi(path[2])
 			if err == nil {
-				id = &parsedId
+				id = &parsedID
 			}
 		}
 		switch r.Method {
@@ -190,7 +190,7 @@ func (e *DbExplorer) tableHandler(t table) http.HandlerFunc {
 			if id == nil {
 				e.selectAllHandler(t)(w, r)
 			} else {
-				e.selectByIdHandler(t, *id)(w, r)
+				e.selectByIDHandler(t, *id)(w, r)
 			}
 		case "PUT":
 			e.insertHandler(t)(w, r)
@@ -277,9 +277,9 @@ func (e *DbExplorer) selectAll(t table, limit, offset int) ([]record, error) {
 	return results, nil
 }
 
-func (e *DbExplorer) selectByIdHandler(t table, id int) http.HandlerFunc {
+func (e *DbExplorer) selectByIDHandler(t table, id int) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		result, ok, err := e.selectById(t, id)
+		result, ok, err := e.selectByID(t, id)
 		if err != nil {
 			e.error(w, err, http.StatusInternalServerError)
 			return
@@ -296,7 +296,7 @@ func (e *DbExplorer) selectByIdHandler(t table, id int) http.HandlerFunc {
 	}
 }
 
-func (e *DbExplorer) selectById(t table, id int) (record, bool, error) {
+func (e *DbExplorer) selectByID(t table, id int) (record, bool, error) {
 	rows, err := e.Query("SELECT * FROM "+t.name+" WHERE " + t.idField + " = ? ", id)
 	if err != nil {
 		return nil, false, err
@@ -340,7 +340,7 @@ func makeValues(colTypes []*sql.ColumnType, t table) []interface{} {
 func convertResults(cols []*sql.ColumnType, values []interface{}) record {
 	result := make(record)
 	for i, col := range cols {
-		var value interface{} = nil
+		var value interface{}
 		switch values[i].(type) {
 		case *sql.NullString:
 			nullString := values[i].(*sql.NullString)
