@@ -24,7 +24,7 @@ func StartMyMicroservice(ctx context.Context, listenAddr string, aclData string)
 
 	lis, err := net.Listen("tcp", listenAddr)
 
-	as := NewAdminServer()
+	as := newAdminServer()
 	mid := middleware{
 		host: listenAddr,
 		acl:  acl,
@@ -180,7 +180,7 @@ func (as *adminServer) log(e Event) {
 	}
 }
 
-func NewAdminServer() *adminServer {
+func newAdminServer() *adminServer {
 	as := adminServer{
 		subs: make(map[int]chan Event),
 	}
@@ -197,7 +197,8 @@ func (as *adminServer) stop() {
 }
 
 func (as *adminServer) Logging(in *Nothing, serv Admin_LoggingServer) error {
-	_, events := as.newSub()
+	id, events := as.newSub()
+	defer func() {as.deleteSub(id)}()
 	for event := range events {
 		err := serv.Send(&event)
 		if err != nil {
@@ -210,7 +211,8 @@ func (as *adminServer) Logging(in *Nothing, serv Admin_LoggingServer) error {
 func (as *adminServer) Statistics(interval *StatInterval, serv Admin_StatisticsServer) error {
 	statByConsumer := make(map[string]uint64)
 	statByMethod := make(map[string]uint64)
-	_, sub := as.newSub()
+	id, sub := as.newSub()
+	defer func() {as.deleteSub(id)}()
 
 	ticker := time.NewTicker(time.Duration(interval.IntervalSeconds) * time.Second)
 	defer ticker.Stop()
