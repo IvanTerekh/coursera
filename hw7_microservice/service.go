@@ -56,7 +56,7 @@ func StartMyMicroservice(ctx context.Context, listenAddr string, aclData string)
 
 type middleware struct {
 	acl  map[string][]string
-	log  func(event Event)
+	log  func(Event)
 }
 
 func (mid *middleware) streamInterceptor(
