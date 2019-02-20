@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -26,7 +27,6 @@ func StartMyMicroservice(ctx context.Context, listenAddr string, aclData string)
 
 	as := newAdminServer()
 	mid := middleware{
-		host: listenAddr,
 		acl:  acl,
 		log:  as.log,
 	}
@@ -55,7 +55,6 @@ func StartMyMicroservice(ctx context.Context, listenAddr string, aclData string)
 }
 
 type middleware struct {
-	host string
 	acl  map[string][]string
 	log  func(event Event)
 }
@@ -93,7 +92,13 @@ func (mid *middleware) process(ctx context.Context, method string) error {
 		return err
 	}
 
-	mid.logRequest(consumer, method)
+	host, err := getClientHost(ctx)
+	if err != nil {
+		log.Println(err)
+		return err
+	}
+
+	mid.logRequest(consumer, method, host)
 	err = mid.checkAuth(consumer, method, mid.acl)
 	if err != nil {
 		return err
@@ -117,12 +122,26 @@ func getConsumer(ctx context.Context) (string, error) {
 	return consumer[0], nil
 }
 
-func (mid *middleware) logRequest(consumer string, method string) {
+func getClientHost(ctx context.Context) (string, error) {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return "", errors.New("could not get client metadata from incoming context")
+	}
+
+	authority, ok := md[":authority"]
+	if !ok || len(authority) == 0 {
+		return "", errors.New("could not get client host from incoming context")
+	}
+
+	return strings.Split(authority[0], ":")[0] + ":", nil
+}
+
+func (mid *middleware) logRequest(consumer string, method string, host string) {
 	mid.log(Event{
 		Timestamp: time.Now().Unix(),
 		Consumer:  consumer,
 		Method:    method,
-		Host:      mid.host + "kek", //TODO
+		Host:      host,
 	})
 }
 
@@ -198,7 +217,7 @@ func (as *adminServer) stop() {
 
 func (as *adminServer) Logging(in *Nothing, serv Admin_LoggingServer) error {
 	id, events := as.newSub()
-	defer func() {as.deleteSub(id)}()
+	defer func() { as.deleteSub(id) }()
 	for event := range events {
 		err := serv.Send(&event)
 		if err != nil {
@@ -212,7 +231,7 @@ func (as *adminServer) Statistics(interval *StatInterval, serv Admin_StatisticsS
 	statByConsumer := make(map[string]uint64)
 	statByMethod := make(map[string]uint64)
 	id, sub := as.newSub()
-	defer func() {as.deleteSub(id)}()
+	defer func() { as.deleteSub(id) }()
 
 	ticker := time.NewTicker(time.Duration(interval.IntervalSeconds) * time.Second)
 	defer ticker.Stop()
