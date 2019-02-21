@@ -3,13 +3,18 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io/ioutil"
 	"net/http"
 	"strconv"
 	"strings"
 )
+
+type colDesc struct {
+	dataType dataType
+	null     bool
+	primary  bool
+}
 
 type dataType int
 
@@ -18,97 +23,94 @@ const (
 	stringType
 )
 
-type colDesc struct {
-	dataType
-	null    bool
-	primary bool
+type table struct {
+	name       string
+	primaryKey string
+	columns    map[string]colDesc
 }
-
-type columns map[string]colDesc
 
 type record map[string]interface{}
 
-func (rec record) toFieldsValues() ([]string, []interface{}) {
-	fields := make([]string, 0, len(rec))
-	values := make([]interface{}, 0, len(rec))
-	for field, value := range rec {
-		fields = append(fields, field)
-		values = append(values, value)
-	}
-	return fields, values
-}
-
-type table struct {
-	name    string
-	idField string
-	columns
-}
-
-type DbExplorer struct {
+type dataAccessObject struct {
+	db     *sql.DB
 	tables []table
-	*sql.DB
-	*http.ServeMux
 }
 
-func NewDbExplorer(db *sql.DB) (*DbExplorer, error) {
-	err := db.Ping()
-	if err != nil {
-		return nil, fmt.Errorf("could not connect to db: %v", err)
-	}
-
-	explorer := &DbExplorer{DB: db}
-
-	err = explorer.initTables()
-	if err != nil {
-		return nil, fmt.Errorf("could not init tables: %v", err)
-	}
-
-	explorer.initMux()
-
-	return explorer, nil
+type handlerError struct {
+	httpCode int
+	Msg      string `json:"error"`
 }
 
-func (e *DbExplorer) initTables() error {
-	rows, err := e.Query("SHOW TABLES")
+type daoHandler func(dao *dataAccessObject, r *http.Request) (interface{}, *handlerError)
+
+func NewDbExplorer(db *sql.DB) (http.Handler, error) {
+	dao, err := newDataAccessObject(db)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("could not init data access object: %v", err)
+	}
+
+	return newHandler(dao), nil
+}
+
+func newDataAccessObject(db *sql.DB) (*dataAccessObject, error) {
+	tables, err := getTables(db)
+	if err != nil {
+		return nil, fmt.Errorf("could not get tables info: %v", err)
+	}
+
+	return &dataAccessObject{
+		tables: tables,
+		db:     db,
+	}, nil
+}
+
+func (dao *dataAccessObject) tableNames() []string {
+	names := make([]string, 0, len(dao.tables))
+	for _, table := range dao.tables {
+		names = append(names, table.name)
+	}
+	return names
+}
+
+func getTables(db *sql.DB) ([]table, error) {
+	rows, err := db.Query("SHOW TABLES")
+	if err != nil {
+		return nil, fmt.Errorf("could not query table names: %v", err)
 	}
 	defer rows.Close()
 
 	var names []string
 	for rows.Next() {
 		var name string
-		err := rows.Scan(&name)
-		if err != nil {
-			return err
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("could not scan table name: %v", err)
 		}
 		names = append(names, name)
 	}
 
 	var tables []table
 	for _, name := range names {
-		t, err := e.getTable(name)
+		t, err := getTable(db, name)
 		if err != nil {
-			return fmt.Errorf("could not get columns for table %s: %v", name, err)
+			return nil, fmt.Errorf("could not get columns for table %s: %v", name, err)
 		}
 		tables = append(tables, *t)
 	}
 
-	e.tables = tables
-	return nil
+	return tables, nil
 }
 
-func (e *DbExplorer) getTable(name string) (*table, error) {
-	rows, err := e.Query(" SHOW COLUMNS FROM " + name)
+func getTable(db *sql.DB, name string) (*table, error) {
+	rows, err := db.Query(" SHOW COLUMNS FROM " + name)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("could not query columns info for table %v: %v", name, err)
 	}
 	defer rows.Close()
 
 	t := table{
 		name: name,
 	}
-	cols := make(columns)
+	cols := make(map[string]colDesc)
 	for rows.Next() {
 		var field, typeName, null, key string
 		err = rows.Scan(
@@ -120,7 +122,7 @@ func (e *DbExplorer) getTable(name string) (*table, error) {
 			new(interface{}),
 		)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("could not scan columns info for table %v: %v", name, err)
 		}
 		var dt dataType
 		switch strings.Split(typeName, "(")[0] {
@@ -135,7 +137,7 @@ func (e *DbExplorer) getTable(name string) (*table, error) {
 			primary:  key == "PRI",
 		}
 		if desc.primary {
-			t.idField = field
+			t.primaryKey = field
 		}
 
 		cols[field] = desc
@@ -144,114 +146,184 @@ func (e *DbExplorer) getTable(name string) (*table, error) {
 	return &t, nil
 }
 
-func (e *DbExplorer) initMux() {
+func newHandler(dao *dataAccessObject) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", e.rootHandler)
-	for _, t := range e.tables {
-		mux.HandleFunc("/"+t.name+"/", e.tableHandler(t))
+	mux.HandleFunc("/", responseHandler(dao, rootHandler))
+
+	for _, table := range dao.tables {
+		mux.HandleFunc("/"+table.name+"/", responseHandler(dao, tableHandler(table)))
 	}
 
-	e.ServeMux = mux
+	return mux
 }
 
-func (e *DbExplorer) response(w http.ResponseWriter, data interface{}) {
-	response := struct {
-		Response interface{} `json:"response"`
-	}{Response: data}
-	responseJSON, err := json.Marshal(response)
-	if err != nil {
-		e.error(w, err, http.StatusInternalServerError)
-	}
-	w.Write(responseJSON)
-}
-
-func (e *DbExplorer) error(w http.ResponseWriter, err error, code int) {
-	message, errJSON := json.Marshal(struct {
-		Err string `json:"error"`
-	}{Err: err.Error()})
-	if errJSON != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-	}
-	http.Error(w, string(message), code)
-}
-
-func (e *DbExplorer) tableHandler(t table) http.HandlerFunc {
+func responseHandler(dao *dataAccessObject, handler daoHandler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		path := strings.Split(r.URL.Path, "/")
-		var id *int
-		if len(path) > 2 {
-			parsedID, err := strconv.Atoi(path[2])
-			if err == nil {
-				id = &parsedID
-			}
-		}
-		switch r.Method {
-		case "GET":
-			if id == nil {
-				e.selectAllHandler(t)(w, r)
-			} else {
-				e.selectByIDHandler(t, *id)(w, r)
-			}
-		case "PUT":
-			e.insertHandler(t)(w, r)
-		case "POST":
-			if id == nil {
-				e.error(w, errors.New("id not found"), http.StatusBadRequest)
+		response, handlerError := handler(dao, r)
+		if handlerError != nil {
+			errJSON, err := json.Marshal(handlerError)
+			if err != nil {
+				http.Error(w, `{"error": "internal server error"}`, http.StatusInternalServerError)
 				return
 			}
-			e.updateHandler(t, *id)(w, r)
-		case "DELETE":
-			if id == nil {
-				e.error(w, errors.New("id not found"), http.StatusBadRequest)
-				return
-			}
-			e.deleteHandler(t, *id)(w, r)
-		}
-
-	}
-}
-
-func (e *DbExplorer) selectAllHandler(t table) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		defaultLimit := 5
-		defaultOffset := 0
-
-
-		var limit, offset int
-		var err error
-		limitStr := r.URL.Query().Get("limit")
-		if limitStr == "" {
-			limit = defaultLimit
-		} else {
-			limit, err = strconv.Atoi(limitStr)
-			if err != nil {
-				limit = defaultLimit
-			}
-		}
-
-		offsetStr := r.URL.Query().Get("offset")
-		if offsetStr == "" {
-			offset = defaultOffset
-		} else {
-			offset, err = strconv.Atoi(offsetStr)
-			if err != nil {
-				offset = defaultOffset
-			}
-		}
-
-		records, err := e.selectAll(t, limit, offset)
-		if err != nil {
-			e.error(w, err, http.StatusInternalServerError)
+			http.Error(w, string(errJSON), handlerError.httpCode)
 			return
 		}
-		e.response(w, struct {
-			Records []record `json:"records"`
-		}{Records: records})
+
+		responseJSON, err := json.Marshal(struct {
+			Response interface{} `json:"response"`
+		}{Response: response})
+		if err != nil {
+			http.Error(w, `{"error": "internal server error"}`, http.StatusInternalServerError)
+			return
+		}
+		w.Write(responseJSON)
 	}
 }
 
-func (e *DbExplorer) selectAll(t table, limit, offset int) ([]record, error) {
-	rows, err := e.Query("SELECT * FROM "+t.name+" LIMIT ? OFFSET ? ", limit, offset)
+func rootHandler(dao *dataAccessObject, r *http.Request) (interface{}, *handlerError) {
+	if r.URL.Path != "/" {
+		return nil, &handlerError{
+			httpCode: http.StatusNotFound,
+			Msg:      "unknown table",
+		}
+	}
+
+	return struct {
+		Tables []string `json:"tables"`
+	}{Tables: dao.tableNames()}, nil
+}
+
+func tableHandler(table table) daoHandler {
+	return func(dao *dataAccessObject, r *http.Request) (i interface{}, h *handlerError) {
+		id, gotID := parseID(r.URL.Path)
+
+		switch r.Method {
+		case "GET":
+			if gotID {
+				return selectByIDHandler(table, id)(dao, r)
+			}
+			return selectAllHandler(table)(dao, r)
+		case "PUT":
+			return insertHandler(table)(dao, r)
+		case "POST":
+			if !gotID {
+				return nil, &handlerError{
+					httpCode: http.StatusBadRequest,
+					Msg:      "id not found",
+				}
+			}
+			return updateHandler(table, id)(dao, r)
+		case "DELETE":
+			if !gotID {
+				return nil, &handlerError{
+					httpCode: http.StatusBadRequest,
+					Msg:      "id not found",
+				}
+			}
+			return deleteHandler(table, id)(dao, r)
+		}
+
+		return nil, &handlerError{
+			httpCode: http.StatusBadRequest,
+			Msg:      "unsupported method",
+		}
+	}
+}
+
+func parseID(url string) (int, bool) {
+	path := strings.Split(url, "/")
+	if len(path) > 2 {
+		id, err := strconv.Atoi(path[2])
+		if err == nil {
+			return id, true
+		}
+	}
+	return -1, false
+}
+
+func selectByIDHandler(t table, id int) daoHandler {
+	return func(dao *dataAccessObject, r *http.Request) (interface{}, *handlerError) {
+		result, ok, err := dao.selectByID(t, id)
+		if err != nil {
+			return nil, &handlerError{
+				httpCode: http.StatusInternalServerError,
+				Msg:      fmt.Sprintf("could not select from %v by id: %v", t, err),
+			}
+		}
+
+		if !ok {
+			return nil, &handlerError{
+				httpCode: http.StatusNotFound,
+				Msg:      "record not found",
+			}
+		}
+
+		return struct {
+			Record record `json:"record"`
+		}{Record: result}, nil
+	}
+}
+
+func (dao *dataAccessObject) selectByID(table table, id int) (record, bool, error) {
+	rows, err := dao.db.Query("SELECT * FROM "+table.name+" WHERE "+table.primaryKey+" = ? ", id)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
+		return nil, false, nil
+	}
+
+	cols, err := rows.ColumnTypes()
+	if err != nil {
+		return nil, false, err
+	}
+
+	values := makeValues(cols, table)
+	err = rows.Scan(values...)
+	if err != nil {
+		return nil, false, err
+	}
+
+	result := convertResults(cols, values)
+	return result, true, nil
+}
+
+func selectAllHandler(t table) daoHandler {
+	return func(dao *dataAccessObject, r *http.Request) (i interface{}, i2 *handlerError) {
+		limit := getIntParam(r, "limit", 5)
+		offset := getIntParam(r, "offset", 0)
+
+		records, err := dao.selectAll(t, limit, offset)
+		if err != nil {
+			return nil, &handlerError{
+				httpCode: http.StatusInternalServerError,
+				Msg:      fmt.Sprintf("could not select all from %v: %v", t, err),
+			}
+		}
+		return struct {
+			Records []record `json:"records"`
+		}{Records: records}, nil
+	}
+}
+
+func getIntParam(r *http.Request, key string, defaultVal int) int {
+	paramStr := r.URL.Query().Get(key)
+	if paramStr == "" {
+		return defaultVal
+	}
+
+	param, err := strconv.Atoi(paramStr)
+	if err != nil {
+		return defaultVal
+	}
+	return param
+}
+
+func (dao *dataAccessObject) selectAll(t table, limit, offset int) ([]record, error) {
+	rows, err := dao.db.Query("SELECT * FROM "+t.name+" LIMIT ? OFFSET ? ", limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -275,51 +347,6 @@ func (e *DbExplorer) selectAll(t table, limit, offset int) ([]record, error) {
 	}
 
 	return results, nil
-}
-
-func (e *DbExplorer) selectByIDHandler(t table, id int) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		result, ok, err := e.selectByID(t, id)
-		if err != nil {
-			e.error(w, err, http.StatusInternalServerError)
-			return
-		}
-
-		if !ok {
-			e.error(w, errors.New("record not found"), http.StatusNotFound)
-			return
-		}
-
-		e.response(w, struct {
-			Record record `json:"record"`
-		}{Record: result})
-	}
-}
-
-func (e *DbExplorer) selectByID(t table, id int) (record, bool, error) {
-	rows, err := e.Query("SELECT * FROM "+t.name+" WHERE " + t.idField + " = ? ", id)
-	if err != nil {
-		return nil, false, err
-	}
-	defer rows.Close()
-
-	if !rows.Next() {
-		return nil, false, nil
-	}
-
-	cols, err := rows.ColumnTypes()
-	if err != nil {
-		return nil, false, err
-	}
-
-	values := makeValues(cols, t)
-	err = rows.Scan(values...)
-	if err != nil {
-		return nil, false, err
-	}
-
-	result := convertResults(cols, values)
-	return result, true, nil
 }
 
 func makeValues(colTypes []*sql.ColumnType, t table) []interface{} {
@@ -358,37 +385,25 @@ func convertResults(cols []*sql.ColumnType, values []interface{}) record {
 	return result
 }
 
-func (e *DbExplorer) rootHandler(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		e.error(w, errors.New("unknown table"), http.StatusNotFound)
-		return
-	}
-
-	tableNames := make([]string, 0, len(e.tables))
-	for _, t := range e.tables {
-		tableNames = append(tableNames, t.name)
-	}
-
-	e.response(w, struct {
-		Tables []string `json:"tables"`
-	}{Tables: tableNames})
-}
-
-func (e *DbExplorer) insertHandler(t table) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+func insertHandler(t table) daoHandler {
+	return func(dao *dataAccessObject, r *http.Request) (interface{}, *handlerError) {
 
 		item, err := parseBody(r)
 		if err != nil {
-			e.error(w, err, http.StatusInternalServerError)
-			return
+			return nil, &handlerError{
+				httpCode: http.StatusInternalServerError,
+				Msg:      fmt.Sprintf("could not parse input data: %v", err),
+			}
 		}
 
-		delete(item, t.idField)
+		delete(item, t.primaryKey)
 
 		err = validateParams(item, t)
 		if err != nil {
-			e.error(w, err, http.StatusBadRequest)
-			return
+			return nil, &handlerError{
+				httpCode: http.StatusBadRequest,
+				Msg:      err.Error(),
+			}
 		}
 
 		for col, desc := range t.columns {
@@ -402,19 +417,21 @@ func (e *DbExplorer) insertHandler(t table) http.HandlerFunc {
 			}
 		}
 
-		id, err := e.insertInto(t, item)
+		id, err := dao.insertInto(t, item)
 		if err != nil {
-			e.error(w, err, http.StatusInternalServerError)
-			return
+			return nil, &handlerError{
+				httpCode: http.StatusInternalServerError,
+				Msg:      fmt.Sprintf("could not insert item %v: %v", item, err),
+			}
 		}
 
 		resp := make(map[string]int64)
-		resp[t.idField] = id
-		e.response(w, resp)
+		resp[t.primaryKey] = id
+		return resp, nil
 	}
 }
 
-func (e *DbExplorer) insertInto(t table, item record) (int64, error) {
+func (dao *dataAccessObject) insertInto(t table, item record) (int64, error) {
 	fields, values := item.toFieldsValues()
 
 	queryBuilder := strings.Builder{}
@@ -426,11 +443,21 @@ func (e *DbExplorer) insertInto(t table, item record) (int64, error) {
 	queryBuilder.WriteString(strings.Repeat(",?", len(fields))[1:])
 	queryBuilder.WriteString(")")
 
-	result, err := e.Exec(queryBuilder.String(), values...)
+	result, err := dao.db.Exec(queryBuilder.String(), values...)
 	if err != nil {
 		return 0, err
 	}
 	return result.LastInsertId()
+}
+
+func (rec record) toFieldsValues() ([]string, []interface{}) {
+	fields := make([]string, 0, len(rec))
+	values := make([]interface{}, 0, len(rec))
+	for field, value := range rec {
+		fields = append(fields, field)
+		values = append(values, value)
+	}
+	return fields, values
 }
 
 func validateParams(r record, t table) error {
@@ -459,38 +486,46 @@ func validateParams(r record, t table) error {
 	return nil
 }
 
-func (e *DbExplorer) updateHandler(t table, id int) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+func updateHandler(t table, id int) daoHandler {
+	return func(dao *dataAccessObject, r *http.Request) (interface{}, *handlerError) {
 		item, err := parseBody(r)
 		if err != nil {
-			e.error(w, err, http.StatusInternalServerError)
-			return
+			return nil, &handlerError{
+				httpCode: http.StatusInternalServerError,
+				Msg:      fmt.Sprintf("could not parse input data: %v", err),
+			}
 		}
 
-		if _, ok := item[t.idField]; ok {
-			e.error(w, fmt.Errorf("field %s have invalid type", t.idField), http.StatusBadRequest)
-			return
+		if _, ok := item[t.primaryKey]; ok {
+			return nil, &handlerError{
+				httpCode: http.StatusBadRequest,
+				Msg:      fmt.Sprintf("field %s have invalid type", t.primaryKey),
+			}
 		}
 
 		err = validateParams(item, t)
 		if err != nil {
-			e.error(w, err, http.StatusBadRequest)
-			return
+			return nil, &handlerError{
+				httpCode: http.StatusBadRequest,
+				Msg:      err.Error(),
+			}
 		}
 
-		updated, err := e.update(t, item, id)
+		updated, err := dao.update(t, item, id)
 		if err != nil {
-			e.error(w, err, http.StatusInternalServerError)
-			return
+			return nil, &handlerError{
+				httpCode: http.StatusInternalServerError,
+				Msg:      fmt.Sprintf("could not update item %v: %v", item, err),
+			}
 		}
 
-		e.response(w, struct {
+		return struct {
 			Updated int64 `json:"updated"`
-		}{Updated: updated})
+		}{Updated: updated}, nil
 	}
 }
 
-func (e *DbExplorer) update(t table, item record, id int) (int64, error) {
+func (dao *dataAccessObject) update(t table, item record, id int) (int64, error) {
 	fields, values := item.toFieldsValues()
 
 	queryBuilder := strings.Builder{}
@@ -507,10 +542,10 @@ func (e *DbExplorer) update(t table, item record, id int) (int64, error) {
 	}
 
 	queryBuilder.WriteString(" WHERE ")
-	queryBuilder.WriteString(t.idField)
+	queryBuilder.WriteString(t.primaryKey)
 	queryBuilder.WriteString(" = ? ")
 
-	result, err := e.Exec(queryBuilder.String(), append(values, id)...)
+	result, err := dao.db.Exec(queryBuilder.String(), append(values, id)...)
 	if err != nil {
 		return 0, err
 	}
@@ -532,29 +567,31 @@ func parseBody(r *http.Request) (record, error) {
 	return *item, nil
 }
 
-func (e *DbExplorer) deleteHandler(t table, id int) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		deleted, err := e.delete(t, id)
+func deleteHandler(t table, id int) daoHandler {
+	return func(dao *dataAccessObject, r *http.Request) (interface{}, *handlerError) {
+		deleted, err := dao.delete(t, id)
 		if err != nil {
-			e.error(w, err, http.StatusInternalServerError)
-			return
+			return nil, &handlerError{
+				httpCode: http.StatusInternalServerError,
+				Msg:      fmt.Sprintf("could not delete by id %v: %v", id, err),
+			}
 		}
 
-		e.response(w, struct {
+		return struct {
 			Deleted int64 `json:"deleted"`
-		}{Deleted: deleted})
+		}{Deleted: deleted}, nil
 	}
 }
 
-func (e *DbExplorer) delete(t table, id int) (int64, error) {
+func (dao *dataAccessObject) delete(t table, id int) (int64, error) {
 	queryBuilder := strings.Builder{}
 	queryBuilder.WriteString("DELETE FROM ")
 	queryBuilder.WriteString(t.name)
 	queryBuilder.WriteString(" WHERE ")
-	queryBuilder.WriteString(t.idField)
+	queryBuilder.WriteString(t.primaryKey)
 	queryBuilder.WriteString(" = ? ")
 
-	result, err := e.Exec(queryBuilder.String(), id)
+	result, err := dao.db.Exec(queryBuilder.String(), id)
 	if err != nil {
 		return 0, err
 	}
