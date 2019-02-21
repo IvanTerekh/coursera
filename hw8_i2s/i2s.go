@@ -6,48 +6,64 @@ import (
 	"reflect"
 )
 
-func i2s(data interface{}, out interface{}) error {
-	outValue := reflect.ValueOf(out).Elem()
-	outType := outValue.Type()
-	_ = outType//TODO
-
-	dataMap, ok := data.(map[string]interface{})
-	if !ok {
-		return errors.New("data must be map[string]interface{}")
+func i2s(data interface{}, outPtr interface{}) error {
+	outPtrValue := reflect.ValueOf(outPtr)
+	if outPtrValue.Kind() != reflect.Ptr {
+		return errors.New("a pointer expected")
 	}
-	for key, val := range dataMap {
-		field := outValue.FieldByName(key)
-		if !field.IsValid() {
-			return fmt.Errorf("could not find field %v", key)
+	out := outPtrValue.Elem()
+
+	switch out.Kind() {
+	case reflect.String:
+		valStr, ok := data.(string)
+		if !ok {
+			return fmt.Errorf("%v must be string", data)
 		}
-
-		switch field.Type().Name() {
-		case "string":
-			valStr, ok := val.(string)
-			if !ok {
-				return fmt.Errorf("field %v must be string", key)
-			}
-			field.SetString(valStr)
-		case "bool":
-			valBool, ok := val.(bool)
-			if !ok {
-				return fmt.Errorf("field %v must be bool", key)
-			}
-			field.SetBool(valBool)
-		case "int":
-			valFloat, ok := val.(float64)
-			if !ok {
-				return fmt.Errorf("field %v must be number", key)
-			}
-			field.SetInt(int64(valFloat))
-		default:
-			fmt.Println(field.Type().Name() )
-
+		out.SetString(valStr)
+	case reflect.Bool:
+		valBool, ok := data.(bool)
+		if !ok {
+			return fmt.Errorf("%v must be bool", data)
 		}
+		out.SetBool(valBool)
+	case reflect.Int:
+		valFloat, ok := data.(float64)
+		if !ok {
+			return fmt.Errorf("%v must be number", data)
+		}
+		out.SetInt(int64(valFloat))
+	case reflect.Struct:
+		dataMap, ok := data.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("%v must be map[string]interface{}", data)
+		}
+		for key, val := range dataMap {
+			dest := reflect.New(out.FieldByName(key).Type()).Interface()
+			err := i2s(val, dest)
+			if err != nil {
+				return fmt.Errorf("could not convert %v to struct: %v", data, err)
+			}
+			out.FieldByName(key).Set(reflect.ValueOf(dest).Elem())
+		}
+	case reflect.Slice:
+		vals, ok := data.([]interface{})
+		if !ok {
+			return errors.New("%v must be a slice")
+		}
+		var dests = reflect.New(out.Type()).Elem()
+		for _, val := range vals {
+			dest := reflect.New(out.Type().Elem()).Interface()
+			err := i2s(val, dest)
+			if err != nil {
+				return fmt.Errorf("could not convert %v to struct: %v", val, err)
+			}
+			dests = reflect.Append(dests, reflect.ValueOf(dest).Elem())
+		}
+		out.Set(dests)
+	default:
+		return fmt.Errorf("unknown type of field %v: %v", out, out.Type().Name())
 
-		_ = val //TODO
 	}
 
 	return nil
 }
-
